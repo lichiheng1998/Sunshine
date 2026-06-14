@@ -457,6 +457,16 @@ namespace platf {
     nvenc::nvenc_base *nvenc = nullptr;
   };
 
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  /**
+   * @brief Stub encode device for PyroWave — carries colorspace metadata only.
+   *        All GPU resources live in pyrowave::session_t::impl_t.
+   */
+  struct pyrowave_encode_device_t: encode_device_t {
+    int convert(platf::img_t &) override { return 0; }
+  };
+#endif
+
   enum class capture_e : int {
     ok,  ///< Success
     reinit,  ///< Need to reinitialize

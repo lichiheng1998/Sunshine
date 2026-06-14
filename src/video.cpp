@@ -31,6 +31,10 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  #include "platform/linux/pyrowave_encode.h"
+#endif
+
 #ifdef _WIN32
 extern "C" {
   #include <libavutil/hwcontext_d3d11va.h>
@@ -1085,6 +1089,39 @@ namespace video {
     LIMITED_GOP_SIZE | PARALLEL_ENCODING
   };
   #endif  // SUNSHINE_BUILD_VULKAN
+
+  #ifdef SUNSHINE_BUILD_PYROWAVE
+  encoder_t pyrowave {
+    "pyrowave"sv,
+    std::make_unique<encoder_platform_formats_pyrowave>(),
+    // AV1 slot — empty (PyroWave is its own codec; reachable via encoder=pyrowave config)
+    {
+      {},  // common options
+      {},  // SDR options
+      {},  // HDR options
+      {},  // YUV444 SDR options
+      {},  // YUV444 HDR options
+      {},  // fallback options
+      {}   // codec name (unused: PyroWave bypasses avcodec)
+    },
+    // HEVC slot — empty
+    {
+      {}, {}, {}, {}, {}, {}, {}
+    },
+    // H.264 slot — marked as "pyrowave" for codec selection routing
+    {
+      {},  // common options
+      {},  // SDR options
+      {},  // HDR options
+      {},  // YUV444 SDR options
+      {},  // YUV444 HDR options
+      {},  // fallback options
+      "pyrowave"s,
+    },
+    // Flags: intra-only so no ref-frame invalidation; no parallel encoding needed
+    H264_ONLY
+  };
+  #endif  // SUNSHINE_BUILD_PYROWAVE
 #endif  // linux
 
 #ifdef __APPLE__
@@ -1173,6 +1210,9 @@ namespace video {
     &vulkan,
   #endif
     &vaapi,
+  #ifdef SUNSHINE_BUILD_PYROWAVE
+    &pyrowave,
+  #endif
 #endif
 #ifdef __APPLE__
     &videotoolbox,
@@ -1180,7 +1220,7 @@ namespace video {
     &software
   };
 
-  static encoder_t *chosen_encoder;
+  encoder_t *chosen_encoder;
   int active_hevc_mode;
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
@@ -1611,6 +1651,21 @@ namespace video {
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
     }
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    else if (auto pw_session = dynamic_cast<pyrowave::session_t *>(&session)) {
+      auto bitstream = pw_session->take_bitstream();
+      if (bitstream.empty()) {
+        BOOST_LOG(error) << "PyroWave returned empty bitstream"sv;
+        return -1;
+      }
+      BOOST_LOG(verbose) << "[pyrowave] frame #"sv << frame_nr << " bitstream "sv << bitstream.size() << " bytes"sv;
+      auto packet = std::make_unique<packet_raw_generic>(std::move(bitstream), frame_nr, true);
+      packet->channel_data = channel_data;
+      packet->frame_timestamp = frame_timestamp;
+      packets->raise(std::move(packet));
+      return 0;
+    }
+#endif
 
     return -1;
   }
@@ -2015,6 +2070,11 @@ namespace video {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
       return make_nvenc_encode_session(config, std::move(nvenc_encode_device));
     }
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    else if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
+      return pyrowave::make_session(width, height, config, encode_device->colorspace);
+    }
+#endif
 
     return nullptr;
   }
@@ -2218,6 +2278,11 @@ namespace video {
     } else if (dynamic_cast<const encoder_platform_formats_nvenc *>(encoder.platform_formats.get())) {
       result = disp.make_nvenc_encode_device(pix_fmt);
     }
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    else if (dynamic_cast<const encoder_platform_formats_pyrowave *>(encoder.platform_formats.get())) {
+      result = pyrowave::make_encode_device();
+    }
+#endif
 
     if (result) {
       result->colorspace = colorspace;

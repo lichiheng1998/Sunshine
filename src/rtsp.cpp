@@ -815,6 +815,12 @@ namespace rtsp_stream {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    if (video::chosen_encoder && video::chosen_encoder->name == "pyrowave") {
+      ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
+    }
+#endif
+
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
       ss << "a=fmtp:97 surround-params="sv << session.surround_params << std::endl;
@@ -1128,6 +1134,23 @@ namespace rtsp_stream {
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
     }
+
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    if (config.monitor.videoFormat == 3 && video::chosen_encoder &&
+        video::chosen_encoder->name != "pyrowave"sv) {
+      BOOST_LOG(warning) << "Client requested PyroWave but PyroWave encoder is not active"sv;
+
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+#else
+    if (config.monitor.videoFormat == 3) {
+      BOOST_LOG(warning) << "Client requested PyroWave but this build does not support it"sv;
+
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+#endif
 
     // Check that any required encryption is enabled
     auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());

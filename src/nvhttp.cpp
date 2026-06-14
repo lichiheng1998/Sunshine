@@ -763,6 +763,11 @@ namespace nvhttp {
         codec_mode_flags |= SCM_AV1_HIGH10_444;
       }
     }
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    if (video::chosen_encoder && video::chosen_encoder->name == "pyrowave") {
+      codec_mode_flags |= SCM_PYROWAVE;
+    }
+#endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
 
     if (!config::nvhttp.external_ip.empty()) {

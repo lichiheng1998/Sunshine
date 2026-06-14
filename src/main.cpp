@@ -26,6 +26,12 @@
 #include "system_tray.h"
 #include "upnp.h"
 #include "video.h"
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  #include "platform/linux/pyrowave_encode.h"
+namespace pyrowave {
+  int run_capture_test();
+}
+#endif
 
 extern "C" {
 #include "rswrapper.h"
@@ -56,6 +62,11 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
   {"version"sv, [](const char *name, int argc, char **argv) {
      return args::version();
    }},
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  {"pyrowave-test"sv, [](const char *name, int argc, char **argv) {
+     return pyrowave::run_capture_test();
+   }},
+#endif
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();

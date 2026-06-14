@@ -106,6 +106,25 @@ namespace video {
     init_buffer_function_t init_avcodec_hardware_input_buffer;
   };
 
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  /**
+   * @brief Platform formats tag for the PyroWave encoder.
+   *
+   * dev_type=vulkan: use the DRM/Vulkan display backend so that DMA-BUF frames
+   * are available to the encoder.  The pix_fmt fields are unused because
+   * PyroWave performs its own RGB→YCbCr conversion.
+   */
+  struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
+    encoder_platform_formats_pyrowave() {
+      dev_type = platf::mem_type_e::vulkan;
+      pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
+      pix_fmt_10bit = platf::pix_fmt_e::nv12;
+      pix_fmt_yuv444_8bit = platf::pix_fmt_e::yuv420p;
+      pix_fmt_yuv444_10bit = platf::pix_fmt_e::nv12;
+    }
+  };
+#endif
+
   struct encoder_platform_formats_nvenc: encoder_platform_formats_t {
     encoder_platform_formats_nvenc(
       const platf::mem_type_e &dev_type,
@@ -201,6 +220,9 @@ namespace video {
           return hevc;
         case 2:
           return av1;
+        case 3:
+          // PyroWave uses the h264 slot (name = "pyrowave"); bypasses avcodec entirely
+          return h264;
       }
     }
 
@@ -238,6 +260,10 @@ namespace video {
 
 #ifdef __APPLE__
   extern encoder_t videotoolbox;
+#endif
+
+#ifdef SUNSHINE_BUILD_PYROWAVE
+  extern encoder_t pyrowave;
 #endif
 
   struct packet_raw_t {
@@ -343,6 +369,7 @@ namespace video {
 
   extern int active_hevc_mode;
   extern int active_av1_mode;
+  extern encoder_t *chosen_encoder;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
 

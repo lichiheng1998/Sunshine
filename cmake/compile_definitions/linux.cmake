@@ -197,6 +197,68 @@ if(${SUNSHINE_ENABLE_VULKAN})
     set(SUNSHINE_TARGET_DEPENDENCIES ${SUNSHINE_TARGET_DEPENDENCIES} vulkan_shaders)
 endif()
 
+# PyroWave wavelet codec
+if(${SUNSHINE_ENABLE_PYROWAVE})
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_PYROWAVE=1)
+
+    # Find a GLSL compiler if the Vulkan encoder block didn't already find one.
+    if(NOT GLSLC_EXECUTABLE AND NOT GLSLANG_EXECUTABLE)
+        find_program(GLSLC_EXECUTABLE glslc)
+        if(NOT GLSLC_EXECUTABLE)
+            find_program(GLSLANG_EXECUTABLE glslangValidator)
+        endif()
+    endif()
+
+    # Compile rgb2ycbcr_planes.comp → SPIR-V → C include (same pattern as rgb2yuv)
+    set(PYROWAVE_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")
+    set(PYROWAVE_SHADER_SOURCE
+        "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/shaders/vulkan/rgb2ycbcr_planes.comp")
+    set(PYROWAVE_SHADER_SPV "${PYROWAVE_SHADER_DIR}/rgb2ycbcr_planes.spv")
+    set(PYROWAVE_SHADER_DATA "${PYROWAVE_SHADER_DIR}/rgb2ycbcr_planes.spv.inc")
+
+    file(MAKE_DIRECTORY "${PYROWAVE_SHADER_DIR}")
+
+    if(GLSLC_EXECUTABLE)
+        add_custom_command(
+                OUTPUT "${PYROWAVE_SHADER_SPV}"
+                COMMAND ${GLSLC_EXECUTABLE} -O "${PYROWAVE_SHADER_SOURCE}" -o "${PYROWAVE_SHADER_SPV}"
+                DEPENDS "${PYROWAVE_SHADER_SOURCE}"
+                COMMENT "Compiling PyroWave shader rgb2ycbcr_planes.comp (glslc)"
+                VERBATIM)
+    elseif(GLSLANG_EXECUTABLE)
+        add_custom_command(
+                OUTPUT "${PYROWAVE_SHADER_SPV}"
+                COMMAND ${GLSLANG_EXECUTABLE} -V -o "${PYROWAVE_SHADER_SPV}" "${PYROWAVE_SHADER_SOURCE}"
+                DEPENDS "${PYROWAVE_SHADER_SOURCE}"
+                COMMENT "Compiling PyroWave shader rgb2ycbcr_planes.comp (glslangValidator)"
+                VERBATIM)
+    else()
+        message(FATAL_ERROR "SUNSHINE_ENABLE_PYROWAVE requires glslc or glslangValidator")
+    endif()
+
+    add_custom_command(
+            OUTPUT "${PYROWAVE_SHADER_DATA}"
+            COMMAND ${CMAKE_COMMAND} -DSPV_FILE=${PYROWAVE_SHADER_SPV} -DOUT_FILE=${PYROWAVE_SHADER_DATA}
+                -P "${CMAKE_SOURCE_DIR}/cmake/scripts/binary_to_c.cmake"
+            DEPENDS "${PYROWAVE_SHADER_SPV}"
+            COMMENT "Generating C include from rgb2ycbcr_planes.spv"
+            VERBATIM)
+
+    add_custom_target(pyrowave_shaders
+            DEPENDS "${PYROWAVE_SHADER_DATA}"
+            COMMENT "PyroWave shader compilation")
+    set(SUNSHINE_TARGET_DEPENDENCIES ${SUNSHINE_TARGET_DEPENDENCIES} pyrowave_shaders)
+
+    # Make the generated shader header findable from pyrowave_encode.cpp
+    include_directories("${PYROWAVE_SHADER_DIR}")
+
+    list(APPEND SUNSHINE_EXTERNAL_LIBRARIES pyrowave granite-vulkan granite-math)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_test.cpp")
+endif()
+
 # wayland
 if(${SUNSHINE_ENABLE_WAYLAND})
     find_package(Wayland REQUIRED)

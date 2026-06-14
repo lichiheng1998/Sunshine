@@ -32,6 +32,108 @@ LizardByte has the full documentation hosted on [Read the Docs](https://docs.liz
 * [Stable Docs](https://docs.lizardbyte.dev/projects/sunshine/latest/)
 * [Beta Docs](https://docs.lizardbyte.dev/projects/sunshine/master/)
 
+## 🌊 PyroWave fork
+
+This fork adds an experimental **PyroWave** encoder — a GPU wavelet intra-codec
+(Vulkan compute) — to Sunshine on Linux. It is intended for very high-bitrate,
+low-latency local streaming to a PyroWave-capable Moonlight client. PyroWave is
+**off by default** and must be enabled at build time with
+`-DSUNSHINE_ENABLE_PYROWAVE=ON`. Without that flag this builds exactly like
+upstream Sunshine.
+
+### Building from source (with PyroWave)
+
+These steps build a PyroWave-enabled Sunshine on Linux from a clean checkout.
+
+> Tested on Linux only. PyroWave requires a Vulkan 1.2+ GPU/driver.
+
+#### 1. Install dependencies
+
+Install the standard Sunshine Linux build dependencies first — see the base list
+in [docs/building.md](docs/building.md) (CMake ≥ 3.25, GCC 14+, Boost, the
+capture/encode libraries, etc.).
+
+PyroWave additionally needs:
+
+- The **Vulkan loader and headers** (e.g. `libvulkan-dev` + `vulkan-headers` on
+  Debian/Ubuntu, or the LunarG Vulkan SDK).
+- A **GLSL → SPIR-V compiler**: `glslc` (from `shaderc`/Vulkan SDK) **or**
+  `glslangValidator` (from `glslang-tools`). Either one is fine; CMake picks
+  whichever it finds.
+
+```bash
+# Debian/Ubuntu example (in addition to the base Sunshine deps)
+sudo apt install -y libvulkan-dev glslang-tools
+```
+
+#### 2. Clone Sunshine and its submodules
+
+```bash
+git clone --recursive https://github.com/<your-fork>/Sunshine.git
+cd Sunshine
+```
+
+If you already cloned without `--recursive`:
+
+```bash
+git submodule update --init --recursive
+```
+
+#### 3. Add the PyroWave dependencies
+
+Granite and pyrowave are **not** registered as Sunshine submodules, so clone them
+into `third-party/` yourself. Granite has its own submodules, so it must be cloned
+recursively.
+
+```bash
+git clone --recursive https://github.com/Themaister/Granite  third-party/Granite
+git clone           https://github.com/Themaister/pyrowave  third-party/pyrowave
+```
+
+#### 4. Configure and build
+
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSUNSHINE_ENABLE_PYROWAVE=ON
+cmake --build build --target sunshine
+```
+
+(Drop `-G Ninja` to use Makefiles instead.) The resulting binary is `build/sunshine`.
+
+#### 5. Grant KMS capture permission
+
+PyroWave uses Vulkan/DMA-BUF capture, which on most setups means KMS grab. KMS
+capture needs the `cap_sys_admin` capability on the binary:
+
+```bash
+sudo setcap cap_sys_admin+p ./build/sunshine
+```
+
+> **Note:** the capability is tied to the binary file, so you must re-run
+> `setcap` after every rebuild.
+
+#### 6. Enable PyroWave at runtime
+
+In your Sunshine config (`~/.config/sunshine/sunshine.conf`), select the PyroWave
+encoder and a compatible capture backend:
+
+```ini
+encoder = pyrowave
+capture = kms
+adapter_name = /dev/dri/card0
+```
+
+Then run `./build/sunshine`. Pair a PyroWave-capable Moonlight client; when its
+codec preference is set to **Auto**, it will negotiate PyroWave automatically.
+
+#### Optional: standalone encode test
+
+A small CLI utility encodes one captured frame and reports size/timing — useful
+for verifying the encoder without a client:
+
+```bash
+./build/sunshine pyrowave-test
+```
+
 ## 🎮 Feature Compatibility
 
 <table>

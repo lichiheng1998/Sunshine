@@ -73,3 +73,9 @@
 	path = third-party/wlr-protocols
 	url = https://github.com/LizardByte-infrastructure/wlr-protocols.git
 	branch = master
+[submodule "third-party/Granite"]
+	path = third-party/Granite
+	url = https://github.com/Themaister/Granite
+[submodule "third-party/pyrowave"]
+	path = third-party/pyrowave
+	url = https://github.com/Themaister/pyrowave.git
