@@ -68,8 +68,11 @@ sudo apt install -y libvulkan-dev glslang-tools
 
 #### 2. Clone Sunshine and its submodules
 
+Granite and pyrowave are wired in as Sunshine submodules (pointing at the PyroWave
+forks), so a recursive clone pulls them in automatically:
+
 ```bash
-git clone --recursive https://github.com/<your-fork>/Sunshine.git
+git clone --recursive -b pyrowave https://github.com/lichiheng1998/Sunshine.git
 cd Sunshine
 ```
 
@@ -79,18 +82,11 @@ If you already cloned without `--recursive`:
 git submodule update --init --recursive
 ```
 
-#### 3. Add the PyroWave dependencies
+> **Heads-up:** the recursive init also pulls Granite's full submodule tree (a few
+> GB). Only `volk`, `vulkan-headers`, `spirv-cross`, `stb` and `rapidjson` are
+> actually used by the build, but fetching the rest is harmless.
 
-Granite and pyrowave are **not** registered as Sunshine submodules, so clone them
-into `third-party/` yourself. Granite has its own submodules, so it must be cloned
-recursively.
-
-```bash
-git clone --recursive https://github.com/Themaister/Granite  third-party/Granite
-git clone           https://github.com/Themaister/pyrowave  third-party/pyrowave
-```
-
-#### 4. Configure and build
+#### 3. Configure and build
 
 ```bash
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSUNSHINE_ENABLE_PYROWAVE=ON
@@ -99,19 +95,20 @@ cmake --build build --target sunshine
 
 (Drop `-G Ninja` to use Makefiles instead.) The resulting binary is `build/sunshine`.
 
-#### 5. Grant KMS capture permission
+#### 4. Grant KMS capture permission
 
 PyroWave uses Vulkan/DMA-BUF capture, which on most setups means KMS grab. KMS
-capture needs the `cap_sys_admin` capability on the binary:
+capture needs `cap_sys_admin` (and `cap_sys_nice`, for receive-thread scheduling)
+on the binary:
 
 ```bash
-sudo setcap cap_sys_admin+p ./build/sunshine
+sudo setcap cap_sys_admin,cap_sys_nice+p ./build/sunshine
 ```
 
 > **Note:** the capability is tied to the binary file, so you must re-run
-> `setcap` after every rebuild.
+> `setcap` after every rebuild (relinking drops it).
 
-#### 6. Enable PyroWave at runtime
+#### 5. Enable PyroWave at runtime
 
 In your Sunshine config (`~/.config/sunshine/sunshine.conf`), select the PyroWave
 encoder and a compatible capture backend:
@@ -121,6 +118,9 @@ encoder = pyrowave
 capture = kms
 adapter_name = /dev/dri/card0
 ```
+
+Chroma subsampling defaults to **4:4:4**. Change it in the web UI (**PyroWave
+Encoder** tab) or via `pyrowave_chroma = 0` (0 = 4:2:0, 1 = 4:4:4) in the config.
 
 Then run `./build/sunshine`. Pair a PyroWave-capable Moonlight client; when its
 codec preference is set to **Auto**, it will negotiate PyroWave automatically.
