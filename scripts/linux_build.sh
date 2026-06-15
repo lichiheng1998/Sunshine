@@ -670,9 +670,23 @@ function run_step_deps() {
 function run_step_cmake() {
   echo "Running step: CMake configure"
 
-  # Ensure submodules are checked out (incl. third-party/Granite and
-  # third-party/pyrowave, required by the PyroWave encoder).
-  git -C "$script_dir/.." submodule update --init --recursive
+  # Ensure submodules are checked out. Recurse everything EXCEPT Granite -- a full
+  # recursive init of Granite pulls its entire sub-tree (glslang/shaderc/spirv-
+  # tools/sdl3/oboe..., several GB) that the Vulkan-compute build never uses. We
+  # init Granite shallowly and then only the few sub-submodules it actually needs.
+  local repo_root="$script_dir/.."
+  local non_granite
+  non_granite=$(git -C "$repo_root" config --file .gitmodules --get-regexp '\.path$' \
+    | awk '{print $2}' | grep -v '^third-party/Granite$')
+  # shellcheck disable=SC2086
+  git -C "$repo_root" submodule update --init --recursive $non_granite
+  git -C "$repo_root" submodule update --init third-party/Granite
+  git -C "$repo_root/third-party/Granite" submodule update --init \
+    third_party/volk \
+    third_party/khronos/vulkan-headers \
+    third_party/spirv-cross \
+    third_party/stb/stb \
+    third_party/rapidjson
 
   # Setup NVM environment if needed (for web UI builds)
   setup_nvm_environment
