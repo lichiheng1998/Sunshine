@@ -691,11 +691,14 @@ function run_step_cmake() {
   local recurse_list
   recurse_list=$(git -C "$repo_root" config --file .gitmodules --get-regexp '\.path$' \
     | awk '{print $2}' | grep -vE '^third-party/(Granite|build-deps)$')
+  # --force so an interrupted checkout (which leaves the submodule working tree
+  # emptied and every file staged as deleted) is recovered on re-run instead of
+  # being silently skipped as "local changes".
   # shellcheck disable=SC2086
-  git -C "$repo_root" submodule update --init --recursive $recurse_list
-  git -C "$repo_root" submodule update --init third-party/build-deps
-  git -C "$repo_root" submodule update --init third-party/Granite
-  git -C "$repo_root/third-party/Granite" submodule update --init \
+  git -C "$repo_root" submodule update --init --force --recursive $recurse_list
+  git -C "$repo_root" submodule update --init --force third-party/build-deps
+  git -C "$repo_root" submodule update --init --force third-party/Granite
+  git -C "$repo_root/third-party/Granite" submodule update --init --force \
     third_party/volk \
     third_party/khronos/vulkan-headers \
     third_party/spirv-cross \
