@@ -107,6 +107,10 @@ sudo setcap cap_sys_admin,cap_sys_nice+p ./build/sunshine
 
 > **Note:** the capability is tied to the binary file, so you must re-run
 > `setcap` after every rebuild (relinking drops it).
+>
+> If you instead install the generated package (`sudo apt install
+> ./build/sunshine*.deb`), its post-install script runs `setcap` for you, so this
+> step is only needed when running `build/sunshine` directly.
 
 #### 5. Enable PyroWave at runtime
 
