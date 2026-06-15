@@ -146,7 +146,11 @@ struct session_t::impl_t {
             const video::sunshine_colorspace_t &colorspace) {
     frame_width = width;
     frame_height = height;
-    chroma = PyroWave::ChromaSubsampling::Chroma444;
+    chroma = (::config::video.pyrowave.chroma == 1)
+               ? PyroWave::ChromaSubsampling::Chroma444
+               : PyroWave::ChromaSubsampling::Chroma420;
+    BOOST_LOG(info) << "[pyrowave] chroma subsampling: "
+                    << (chroma == PyroWave::ChromaSubsampling::Chroma444 ? "4:4:4"sv : "4:2:0"sv);
 
     // 1. Granite context + device
     if (!Vulkan::Context::init_loader(nullptr)) {

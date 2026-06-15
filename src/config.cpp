@@ -506,6 +506,10 @@ namespace config {
       2,  // vk.rc_mode (default: cbr)
     },
 
+    {
+      1,  // pyrowave.chroma (default: 4:4:4)
+    },
+
     {},  // capture
     {},  // encoder
     {},  // adapter_name
@@ -1170,6 +1174,8 @@ namespace config {
 
     int_f(vars, "vk_tune", video.vk.tune);
     int_f(vars, "vk_rc_mode", video.vk.rc_mode);
+
+    int_f(vars, "pyrowave_chroma", video.pyrowave.chroma);
 
     string_f(vars, "capture", video.capture);
     string_f(vars, "encoder", video.encoder);

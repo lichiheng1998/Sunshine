@@ -98,6 +98,10 @@ namespace config {
       int rc_mode;  // 0=driver, 1=cqp, 2=cbr, 4=vbr
     } vk;
 
+    struct {
+      int chroma;  // 0=4:2:0, 1=4:4:4
+    } pyrowave;
+
     std::string capture;
     std::string encoder;
     std::string adapter_name;

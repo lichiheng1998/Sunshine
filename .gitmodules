@@ -75,7 +75,8 @@
 	branch = master
 [submodule "third-party/Granite"]
 	path = third-party/Granite
-	url = https://github.com/Themaister/Granite
+	url = https://github.com/lichiheng1998/Granite
+	branch = pyrowave
 [submodule "third-party/pyrowave"]
 	path = third-party/pyrowave
-	url = https://github.com/Themaister/pyrowave.git
+	url = https://github.com/lichiheng1998/pyrowave.git

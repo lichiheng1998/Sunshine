@@ -343,6 +343,13 @@
             },
           },
           {
+            id: "pyrowave",
+            name: "PyroWave Encoder",
+            options: {
+              "pyrowave_chroma": 1,
+            },
+          },
+          {
             id: "sw",
             name: "Software Encoder",
             options: {
@@ -393,17 +400,22 @@
           var app = document.getElementById("app");
           if (this.platform === "windows") {
             this.tabs = this.tabs.filter((el) => {
-              return el.id !== "vt" && el.id !== "vaapi" && el.id !== "vulkan";
+              return el.id !== "vt" && el.id !== "vaapi" && el.id !== "vulkan" && el.id !== "pyrowave";
             });
           }
-          if (this.platform === "freebsd" || this.platform === "linux") {
+          if (this.platform === "freebsd") {
+            this.tabs = this.tabs.filter((el) => {
+              return el.id !== "amd" && el.id !== "qsv" && el.id !== "vt" && el.id !== "pyrowave";
+            });
+          }
+          if (this.platform === "linux") {
             this.tabs = this.tabs.filter((el) => {
               return el.id !== "amd" && el.id !== "qsv" && el.id !== "vt";
             });
           }
           if (this.platform === "macos") {
             this.tabs = this.tabs.filter((el) => {
-              return el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi" && el.id !== "vulkan";
+              return el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi" && el.id !== "vulkan" && el.id !== "pyrowave";
             });
           }
 
@@ -448,6 +460,7 @@
           'vaapi': 'Gpu',
           'vt': 'Gpu',
           'vulkan': 'Gpu',
+          'pyrowave': 'Gpu',
           'sw': 'Cpu',
         };
         return iconMap[tabId] || 'Settings';
