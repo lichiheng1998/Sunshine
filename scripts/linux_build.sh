@@ -732,9 +732,6 @@ function run_step_cmake() {
     "-G=Ninja"
     "-S=."
     "-DCMAKE_BUILD_TYPE=Release"
-    "-DCMAKE_INSTALL_PREFIX=/usr"
-    "-DSUNSHINE_ASSETS_DIR=share/sunshine"
-    "-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine"
     "-DSUNSHINE_ENABLE_PYROWAVE=ON"
   )
 
@@ -743,6 +740,10 @@ function run_step_cmake() {
     # capture backend is disabled to cut build time, binary size and runtime deps.
     # (KMS grab needs DRM; WAYLAND is kept for Wayland-session capture/cursor --
     # switch it for X11 if you run an X11 session.)
+    # Note: we deliberately do NOT set CMAKE_INSTALL_PREFIX/SUNSHINE_ASSETS_DIR
+    # here, so SUNSHINE_ASSETS_DIR defaults to the in-tree build/assets. That lets
+    # `./build/sunshine` run straight from the build dir (incl. the freshly built
+    # web UI) without installing -- this mode skips packaging anyway.
     cmake_args+=(
       "-DBUILD_WERROR=OFF"
       "-DBUILD_DOCS=OFF"
@@ -759,6 +760,9 @@ function run_step_cmake() {
   else
     cmake_args+=(
       "-DBUILD_WERROR=ON"
+      "-DCMAKE_INSTALL_PREFIX=/usr"
+      "-DSUNSHINE_ASSETS_DIR=share/sunshine"
+      "-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine"
       "-DSUNSHINE_ENABLE_DRM=ON"
       "-DSUNSHINE_ENABLE_KWIN=ON"
       "-DSUNSHINE_ENABLE_PORTAL=ON"
