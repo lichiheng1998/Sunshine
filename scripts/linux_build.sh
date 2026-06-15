@@ -680,16 +680,20 @@ function run_step_deps() {
 function run_step_cmake() {
   echo "Running step: CMake configure"
 
-  # Ensure submodules are checked out. Recurse everything EXCEPT Granite -- a full
-  # recursive init of Granite pulls its entire sub-tree (glslang/shaderc/spirv-
-  # tools/sdl3/oboe..., several GB) that the Vulkan-compute build never uses. We
-  # init Granite shallowly and then only the few sub-submodules it actually needs.
+  # Ensure submodules are checked out. Two submodules must NOT be recursed because
+  # their sub-trees are huge and unused by this build:
+  #   - third-party/Granite: full tree pulls glslang/shaderc/spirv-tools/sdl3/oboe
+  #     (several GB); we only need 5 of its sub-submodules.
+  #   - third-party/build-deps: its sub-tree is the full FFmpeg source (~1.4 GB),
+  #     but Sunshine only reads its tag and downloads a prebuilt FFmpeg release,
+  #     so a shallow top-level checkout is enough.
   local repo_root="$script_dir/.."
-  local non_granite
-  non_granite=$(git -C "$repo_root" config --file .gitmodules --get-regexp '\.path$' \
-    | awk '{print $2}' | grep -v '^third-party/Granite$')
+  local recurse_list
+  recurse_list=$(git -C "$repo_root" config --file .gitmodules --get-regexp '\.path$' \
+    | awk '{print $2}' | grep -vE '^third-party/(Granite|build-deps)$')
   # shellcheck disable=SC2086
-  git -C "$repo_root" submodule update --init --recursive $non_granite
+  git -C "$repo_root" submodule update --init --recursive $recurse_list
+  git -C "$repo_root" submodule update --init third-party/build-deps
   git -C "$repo_root" submodule update --init third-party/Granite
   git -C "$repo_root/third-party/Granite" submodule update --init \
     third_party/volk \
