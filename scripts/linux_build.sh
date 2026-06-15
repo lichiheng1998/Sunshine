@@ -670,6 +670,10 @@ function run_step_deps() {
 function run_step_cmake() {
   echo "Running step: CMake configure"
 
+  # Ensure submodules are checked out (incl. third-party/Granite and
+  # third-party/pyrowave, required by the PyroWave encoder).
+  git -C "$script_dir/.." submodule update --init --recursive
+
   # Setup NVM environment if needed (for web UI builds)
   setup_nvm_environment
   setup_cuda_system_package_environment
@@ -706,6 +710,7 @@ function run_step_cmake() {
     "-DSUNSHINE_ENABLE_PORTAL=ON"
     "-DSUNSHINE_ENABLE_WAYLAND=ON"
     "-DSUNSHINE_ENABLE_X11=ON"
+    "-DSUNSHINE_ENABLE_PYROWAVE=ON"
   )
 
   if [[ "$appimage_build" == 1 ]]; then
