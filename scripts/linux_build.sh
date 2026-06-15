@@ -740,11 +740,13 @@ function run_step_cmake() {
     # capture backend is disabled to cut build time, binary size and runtime deps.
     # (KMS grab needs DRM; WAYLAND is kept for Wayland-session capture/cursor --
     # switch it for X11 if you run an X11 session.)
-    # Note: we deliberately do NOT set CMAKE_INSTALL_PREFIX/SUNSHINE_ASSETS_DIR
-    # here, so SUNSHINE_ASSETS_DIR defaults to the in-tree build/assets. That lets
-    # `./build/sunshine` run straight from the build dir (incl. the freshly built
-    # web UI) without installing -- this mode skips packaging anyway.
+    # Point the install prefix at the build dir so SUNSHINE_ASSETS_DIR resolves to
+    # <build>/assets (assets dir = CMAKE_INSTALL_PREFIX/assets, see
+    # cmake/compile_definitions/unix.cmake). That lets `./build/sunshine` run
+    # straight from the build dir with the freshly built web UI (incl. the PyroWave
+    # tab) without installing -- this mode skips packaging anyway.
     cmake_args+=(
+      "-DCMAKE_INSTALL_PREFIX=${build_dir}"
       "-DBUILD_WERROR=OFF"
       "-DBUILD_DOCS=OFF"
       "-DBUILD_TESTS=OFF"
