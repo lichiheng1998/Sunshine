@@ -26,6 +26,7 @@ skip_cleanup=0
 skip_cuda=0
 skip_libva=0
 skip_package=0
+pyrowave_only=0
 sudo_cmd="sudo"
 ubuntu_test_repo=0
 step="all"
@@ -188,6 +189,8 @@ Options:
   --publisher-website      The URL of the publisher's website.
   --publisher-issue-url    The URL of the publisher's support site or issue tracker.
                            If you provide a modified version of Sunshine, we kindly request that you use your own url.
+  --pyrowave-only          Minimal PyroWave + KMS build: disable VAAPI/Vulkan/X11/KWin/
+                           Portal/tray/docs/tests and imply --skip-cuda/--skip-libva/--skip-package.
   --skip-cleanup           Do not restore the original gcc alternatives, or the math-vector.h file.
   --skip-cuda              Skip CUDA installation.
   --skip-libva             Skip libva installation. This will automatically be enabled if passing --appimage-build.
@@ -240,6 +243,13 @@ while getopts ":hs-:" opt; do
           ;;
         publisher-issue-url=*)
           publisher_issue_url="${OPTARG#*=}"
+          ;;
+        pyrowave-only)
+          # Minimal PyroWave + KMS build: implies skipping CUDA/libva/package.
+          pyrowave_only=1
+          skip_cuda=1
+          skip_libva=1
+          skip_package=1
           ;;
         skip-cleanup) skip_cleanup=1 ;;
         skip-cuda) skip_cuda=1 ;;
@@ -714,18 +724,41 @@ function run_step_cmake() {
     "-B=build"
     "-G=Ninja"
     "-S=."
-    "-DBUILD_WERROR=ON"
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=/usr"
     "-DSUNSHINE_ASSETS_DIR=share/sunshine"
     "-DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine"
-    "-DSUNSHINE_ENABLE_DRM=ON"
-    "-DSUNSHINE_ENABLE_KWIN=ON"
-    "-DSUNSHINE_ENABLE_PORTAL=ON"
-    "-DSUNSHINE_ENABLE_WAYLAND=ON"
-    "-DSUNSHINE_ENABLE_X11=ON"
     "-DSUNSHINE_ENABLE_PYROWAVE=ON"
   )
+
+  if [[ "$pyrowave_only" == 1 ]]; then
+    # Minimal build: PyroWave encoder + KMS capture only. Every other encoder and
+    # capture backend is disabled to cut build time, binary size and runtime deps.
+    # (KMS grab needs DRM; WAYLAND is kept for Wayland-session capture/cursor --
+    # switch it for X11 if you run an X11 session.)
+    cmake_args+=(
+      "-DBUILD_WERROR=OFF"
+      "-DBUILD_DOCS=OFF"
+      "-DBUILD_TESTS=OFF"
+      "-DSUNSHINE_ENABLE_TRAY=OFF"
+      "-DSUNSHINE_ENABLE_DRM=ON"
+      "-DSUNSHINE_ENABLE_WAYLAND=ON"
+      "-DSUNSHINE_ENABLE_X11=OFF"
+      "-DSUNSHINE_ENABLE_KWIN=OFF"
+      "-DSUNSHINE_ENABLE_PORTAL=OFF"
+      "-DSUNSHINE_ENABLE_VAAPI=OFF"
+      "-DSUNSHINE_ENABLE_VULKAN=OFF"
+    )
+  else
+    cmake_args+=(
+      "-DBUILD_WERROR=ON"
+      "-DSUNSHINE_ENABLE_DRM=ON"
+      "-DSUNSHINE_ENABLE_KWIN=ON"
+      "-DSUNSHINE_ENABLE_PORTAL=ON"
+      "-DSUNSHINE_ENABLE_WAYLAND=ON"
+      "-DSUNSHINE_ENABLE_X11=ON"
+    )
+  fi
 
   if [[ "$appimage_build" == 1 ]]; then
     cmake_args+=("-DSUNSHINE_BUILD_APPIMAGE=ON")
