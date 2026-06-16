@@ -111,16 +111,17 @@ namespace video {
    * @brief Platform formats tag for the PyroWave encoder.
    *
    * dev_type=vulkan: use the DRM/Vulkan display backend so that DMA-BUF frames
-   * are available to the encoder.  The pix_fmt fields are unused because
-   * PyroWave performs its own RGB→YCbCr conversion.
+   * are available to the encoder.  The pix_fmt fields are not used for format
+   * selection (PyroWave does its own RGB→YCbCr via a Vulkan compute shader),
+   * but they are set accurately so probing/logging reflects the real capability.
    */
   struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
     encoder_platform_formats_pyrowave() {
       dev_type = platf::mem_type_e::vulkan;
       pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
       pix_fmt_10bit = platf::pix_fmt_e::nv12;
-      pix_fmt_yuv444_8bit = platf::pix_fmt_e::yuv420p;
-      pix_fmt_yuv444_10bit = platf::pix_fmt_e::nv12;
+      pix_fmt_yuv444_8bit = platf::pix_fmt_e::yuv420p;   // unused; PyroWave reads DMA-BUF directly
+      pix_fmt_yuv444_10bit = platf::pix_fmt_e::nv12;     // unused; PyroWave reads DMA-BUF directly
     }
   };
 #endif
@@ -221,12 +222,17 @@ namespace video {
         case 2:
           return av1;
         case 3:
-          // PyroWave uses the h264 slot (name = "pyrowave"); bypasses avcodec entirely
-          return h264;
+          return pyrowave;
       }
     }
 
     uint32_t flags;
+
+    // PyroWave gets its own codec slot rather than riding the H.264 slot.
+    // It is declared after `flags` purely so existing encoders' positional
+    // aggregate-initializers (which end at `flags`) remain valid and leave this
+    // slot default-constructed; only the PyroWave encoder initializes it.
+    codec_t pyrowave;
   };
 
   struct encode_session_t {
@@ -369,9 +375,11 @@ namespace video {
 
   extern int active_hevc_mode;
   extern int active_av1_mode;
+  extern bool active_pyrowave_hdr;
   extern encoder_t *chosen_encoder;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
-  extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
+  extern std::array<bool, 4> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1, 3 - PyroWave
+  extern bool active_pyrowave_hdr;  // PyroWave 10-bit HDR support from the last probe
 
   void capture(
     safe::mail_t mail,

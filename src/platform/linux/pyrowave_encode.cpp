@@ -83,6 +83,12 @@ struct session_t::impl_t {
   PyroWave::ChromaSubsampling chroma = PyroWave::ChromaSubsampling::Chroma420;
   int frame_width = 0, frame_height = 0;
 
+  // YUV plane storage format. 8-bit SDR uses R8_UNORM; 10-bit HDR uses
+  // R16_UNORM so the full dynamic range survives RGB->YCbCr. PyroWave's wavelet
+  // transform operates in normalized float, so the codec itself is format-agnostic.
+  VkFormat yuv_format = VK_FORMAT_R8_UNORM;
+  bool is_hdr = false;
+
   // Bitstream buffers
   Vulkan::BufferHandle meta_dev, meta_host;
   Vulkan::BufferHandle bs_dev, bs_host;
@@ -152,6 +158,13 @@ struct session_t::impl_t {
     BOOST_LOG(info) << "[pyrowave] chroma subsampling: "
                     << (chroma == PyroWave::ChromaSubsampling::Chroma444 ? "4:4:4"sv : "4:2:0"sv);
 
+    // 10-bit HDR uses R16_UNORM planes; SDR stays on R8_UNORM.
+    is_hdr = video::colorspace_is_hdr(colorspace);
+    yuv_format = (colorspace.bit_depth == 10) ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+    BOOST_LOG(info) << "[pyrowave] bit depth: " << colorspace.bit_depth
+                    << "-bit ("sv << (is_hdr ? "HDR"sv : "SDR"sv) << "), plane format "sv
+                    << (yuv_format == VK_FORMAT_R16_UNORM ? "R16_UNORM"sv : "R8_UNORM"sv);
+
     // 1. Granite context + device
     if (!Vulkan::Context::init_loader(nullptr)) {
       BOOST_LOG(error) << "[pyrowave] Vulkan loader init failed"sv;
@@ -171,9 +184,8 @@ struct session_t::impl_t {
       vkGetDeviceProcAddr(raw.dev, "vkGetMemoryFdPropertiesKHR"));
 
     // 2. YCbCr images
-    auto fmt_luma = VK_FORMAT_R8_UNORM;
     Vulkan::ImageCreateInfo img_info =
-      Vulkan::ImageCreateInfo::immutable_2d_image(width, height, fmt_luma);
+      Vulkan::ImageCreateInfo::immutable_2d_image(width, height, yuv_format);
     img_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                      VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     img_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -197,6 +209,22 @@ struct session_t::impl_t {
     if (!encoder.init(&dev, width, height, chroma)) {
       BOOST_LOG(error) << "[pyrowave] PyroWave::Encoder::init() failed"sv;
       return false;
+    }
+
+    // Signal colorspace to the decoder via the bitstream sequence header.
+    {
+      PyroWave::Encoder::ColorMetadata meta = {};
+      bool bt2020 = colorspace.colorspace == video::colorspace_e::bt2020 ||
+                    colorspace.colorspace == video::colorspace_e::bt2020sdr;
+      meta.color_primaries   = bt2020 ? PyroWave::COLOR_PRIMARIES_BT2020 : PyroWave::COLOR_PRIMARIES_BT709;
+      meta.ycbcr_transform   = bt2020 ? PyroWave::YCBCR_TRANSFORM_BT2020 : PyroWave::YCBCR_TRANSFORM_BT709;
+      // colorspace_e::bt2020 is the PQ HDR variant; bt2020sdr keeps the SDR transfer.
+      meta.transfer_function = (colorspace.colorspace == video::colorspace_e::bt2020)
+                                 ? PyroWave::TRANSFER_FUNCTION_PQ
+                                 : PyroWave::TRANSFER_FUNCTION_BT709;
+      meta.ycbcr_range       = colorspace.full_range ? PyroWave::YCBCR_RANGE_FULL : PyroWave::YCBCR_RANGE_LIMITED;
+      meta.chroma_siting     = PyroWave::CHROMA_SITING_CENTER;
+      encoder.set_color_metadata(meta);
     }
 
     // 4. Bitstream buffers (sized using encoder metadata from init above)
@@ -618,7 +646,7 @@ struct session_t::impl_t {
   bool create_yuv_storage_views() {
     VkImageViewCreateInfo view_ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view_ci.format   = VK_FORMAT_R8_UNORM;
+    view_ci.format   = yuv_format;
     view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
     view_ci.image = yuv_images[0]->get_image();

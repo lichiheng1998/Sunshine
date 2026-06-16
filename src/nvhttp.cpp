@@ -766,6 +766,16 @@ namespace nvhttp {
 #ifdef SUNSHINE_BUILD_PYROWAVE
     if (video::chosen_encoder && video::chosen_encoder->name == "pyrowave") {
       codec_mode_flags |= SCM_PYROWAVE;
+      // PyroWave has its own probe slot (index 3). 4:4:4 has no separate bitstream
+      // profile; it's signalled via chromaSamplingType and described in-band by the
+      // sequence header. We still advertise dedicated SCM bits so the client
+      // negotiates chroma through the same ladder as HEVC/AV1.
+      if (video::last_encoder_probe_supported_yuv444_for_codec[3]) {
+        codec_mode_flags |= SCM_PYROWAVE_HIGH8_444;
+        if (video::active_pyrowave_hdr) {
+          codec_mode_flags |= SCM_PYROWAVE_HIGH10_444;
+        }
+      }
     }
 #endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);

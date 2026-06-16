@@ -1094,21 +1094,24 @@ namespace video {
   encoder_t pyrowave {
     "pyrowave"sv,
     std::make_unique<encoder_platform_formats_pyrowave>(),
-    // AV1 slot — empty (PyroWave is its own codec; reachable via encoder=pyrowave config)
+    // AV1 slot — empty (PyroWave uses its own dedicated slot below)
     {
-      {},  // common options
-      {},  // SDR options
-      {},  // HDR options
-      {},  // YUV444 SDR options
-      {},  // YUV444 HDR options
-      {},  // fallback options
-      {}   // codec name (unused: PyroWave bypasses avcodec)
+      {}, {}, {}, {}, {}, {}, {}
     },
     // HEVC slot — empty
     {
       {}, {}, {}, {}, {}, {}, {}
     },
-    // H.264 slot — marked as "pyrowave" for codec selection routing
+    // H.264 slot — empty
+    {
+      {}, {}, {}, {}, {}, {}, {}
+    },
+    // Flags: intra-only so no ref-frame invalidation; no parallel encoding needed.
+    // YUV444_SUPPORT: PyroWave handles 4:4:4 internally via ChromaSubsampling::Chroma444.
+    H264_ONLY | YUV444_SUPPORT,
+    // PyroWave slot (videoFormat 3). PyroWave bypasses avcodec, so the codec name
+    // is only used for logging/routing; the encode device is dispatched by the
+    // encoder_platform_formats_pyrowave type.
     {
       {},  // common options
       {},  // SDR options
@@ -1118,8 +1121,6 @@ namespace video {
       {},  // fallback options
       "pyrowave"s,
     },
-    // Flags: intra-only so no ref-frame invalidation; no parallel encoding needed
-    H264_ONLY
   };
   #endif  // SUNSHINE_BUILD_PYROWAVE
 #endif  // linux
@@ -1223,8 +1224,9 @@ namespace video {
   encoder_t *chosen_encoder;
   int active_hevc_mode;
   int active_av1_mode;
+  bool active_pyrowave_hdr = false;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
-  std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
+  std::array<bool, 4> last_encoder_probe_supported_yuv444_for_codec = {};
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     // We try this twice, in case we still get an error on reinitialization
@@ -2693,20 +2695,37 @@ namespace video {
     auto test_hevc = active_hevc_mode >= 2 || (active_hevc_mode == 0 && !(encoder.flags & H264_ONLY));
     auto test_av1 = active_av1_mode >= 2 || (active_av1_mode == 0 && !(encoder.flags & H264_ONLY));
 
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    const bool is_pyrowave = dynamic_cast<const encoder_platform_formats_pyrowave *>(encoder.platform_formats.get()) != nullptr;
+#else
+    const bool is_pyrowave = false;
+#endif
+    // Every avcodec encoder uses H.264 (videoFormat 0) as its baseline probe.
+    // PyroWave is its own codec (videoFormat 3) with a dedicated slot.
+    encoder_t::codec_t &baseline = is_pyrowave ? encoder.pyrowave : encoder.h264;
+    const int baseline_format = is_pyrowave ? 3 : 0;
+
     encoder.h264.capabilities.set();
     encoder.hevc.capabilities.set();
     encoder.av1.capabilities.set();
+    encoder.pyrowave.capabilities.set();
+    // Clear the slots we won't probe so their all-set caps don't leak through.
+    if (is_pyrowave) {
+      encoder.h264.capabilities.reset();
+    } else {
+      encoder.pyrowave.capabilities.reset();
+    }
 
     // First, test encoder viability
-    config_t config_max_ref_frames {1920, 1080, 60, 6000, 1000, 1, 1, 1, 0, 0, 0};
-    config_t config_autoselect {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 0};
+    config_t config_max_ref_frames {1920, 1080, 60, 6000, 1000, 1, 1, 1, baseline_format, 0, 0};
+    config_t config_autoselect {1920, 1080, 60, 6000, 1000, 1, 0, 1, baseline_format, 0, 0};
 
-    // If the encoder isn't supported at all (not even H.264), bail early
+    // If the encoder isn't supported at all (not even the baseline codec), bail early
     reset_display(disp, encoder.platform_formats->dev_type, output_name, config_autoselect);
     if (!disp) {
       return false;
     }
-    if (!disp->is_codec_supported(encoder.h264.name, config_autoselect)) {
+    if (!disp->is_codec_supported(baseline.name, config_autoselect)) {
       fg.disable();
       BOOST_LOG(info) << "Encoder ["sv << encoder.name << "] is not supported on this GPU"sv;
       return false;
@@ -2728,11 +2747,11 @@ namespace video {
     };
 
     for (auto [validate_flag, encoder_flag] : packet_deficiencies) {
-      encoder.h264[encoder_flag] = (max_ref_frames_h264 & validate_flag && autoselect_h264 & validate_flag);
+      baseline[encoder_flag] = (max_ref_frames_h264 & validate_flag && autoselect_h264 & validate_flag);
     }
 
-    encoder.h264[encoder_t::REF_FRAMES_RESTRICT] = max_ref_frames_h264 >= 0;
-    encoder.h264[encoder_t::PASSED] = true;
+    baseline[encoder_t::REF_FRAMES_RESTRICT] = max_ref_frames_h264 >= 0;
+    baseline[encoder_t::PASSED] = true;
 
     if (test_hevc) {
       config_max_ref_frames.videoFormat = 1;
@@ -2792,13 +2811,14 @@ namespace video {
 
     // Test HDR and YUV444 support
     {
-      // H.264 is special because encoders may support YUV 4:4:4 without supporting 10-bit color depth
+      // The baseline codec (H.264, or PyroWave for its own slot) is special because
+      // encoders may support YUV 4:4:4 without supporting 10-bit color depth.
       if (encoder.flags & YUV444_SUPPORT) {
-        config_t config_h264_yuv444 {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 1};
-        encoder.h264[encoder_t::YUV444] = disp->is_codec_supported(encoder.h264.name, config_h264_yuv444) &&
-                                          validate_config(disp, encoder, config_h264_yuv444) >= 0;
+        config_t config_baseline_yuv444 {1920, 1080, 60, 6000, 1000, 1, 0, 1, baseline_format, 0, 1};
+        baseline[encoder_t::YUV444] = disp->is_codec_supported(baseline.name, config_baseline_yuv444) &&
+                                      validate_config(disp, encoder, config_baseline_yuv444) >= 0;
       } else {
-        encoder.h264[encoder_t::YUV444] = false;
+        baseline[encoder_t::YUV444] = false;
       }
 
       const config_t generic_hdr_config = {1920, 1080, 60, 6000, 1000, 1, 0, 3, 1, 1, 0};
@@ -2838,8 +2858,23 @@ namespace video {
         }
       };
 
-      // HDR is not supported with H.264. Don't bother even trying it.
+      // HDR is not supported with real H.264.
       encoder.h264[encoder_t::DYNAMIC_RANGE] = false;
+
+#ifdef SUNSHINE_BUILD_PYROWAVE
+      // PyroWave is format-agnostic: bit depth and chroma are independent (R16
+      // planes for 10-bit HDR, 4:4:4 handled internally). So probe HDR on its own
+      // slot with a plain 4:2:0 HDR config, leaving the 4:4:4 flag from the
+      // baseline test above untouched rather than coupling the two like avcodec.
+      if (is_pyrowave && encoder.pyrowave[encoder_t::PASSED]) {
+        auto hdr_config = generic_hdr_config;
+        hdr_config.videoFormat = 3;
+        hdr_config.chromaSamplingType = 0;
+        encoder.pyrowave[encoder_t::DYNAMIC_RANGE] =
+          disp->is_codec_supported(encoder.pyrowave.name, hdr_config) &&
+          validate_config(disp, encoder, hdr_config) >= 0;
+      }
+#endif
 
       test_hdr_and_yuv444(encoder.hevc, 1);
       test_hdr_and_yuv444(encoder.av1, 2);
@@ -2848,7 +2883,7 @@ namespace video {
     encoder.h264[encoder_t::VUI_PARAMETERS] = encoder.h264[encoder_t::VUI_PARAMETERS] && !config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE];
     encoder.hevc[encoder_t::VUI_PARAMETERS] = encoder.hevc[encoder_t::VUI_PARAMETERS] && !config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE];
 
-    if (!encoder.h264[encoder_t::VUI_PARAMETERS]) {
+    if (!is_pyrowave && !encoder.h264[encoder_t::VUI_PARAMETERS]) {
       BOOST_LOG(warning) << encoder.name << ": h264 missing sps->vui parameters"sv;
     }
     if (encoder.hevc[encoder_t::PASSED] && !encoder.hevc[encoder_t::VUI_PARAMETERS]) {
@@ -3005,14 +3040,29 @@ namespace video {
                                                        encoder.hevc[encoder_t::YUV444];
     last_encoder_probe_supported_yuv444_for_codec[2] = encoder.av1[encoder_t::PASSED] &&
                                                        encoder.av1[encoder_t::YUV444];
+    last_encoder_probe_supported_yuv444_for_codec[3] = encoder.pyrowave[encoder_t::PASSED] &&
+                                                       encoder.pyrowave[encoder_t::YUV444];
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    // Expose PyroWave's HDR capability globally so nvhttp can advertise
+    // SCM_PYROWAVE_HIGH10_444 in parallel with HEVC/AV1.
+    active_pyrowave_hdr = encoder.pyrowave[encoder_t::PASSED] &&
+                          encoder.pyrowave[encoder_t::DYNAMIC_RANGE];
+#endif
 
-    BOOST_LOG(debug) << "------  h264 ------"sv;
+#ifdef SUNSHINE_BUILD_PYROWAVE
+    const bool is_pyrowave = dynamic_cast<const encoder_platform_formats_pyrowave *>(encoder.platform_formats.get()) != nullptr;
+#else
+    const bool is_pyrowave = false;
+#endif
+    encoder_t::codec_t &baseline = is_pyrowave ? encoder.pyrowave : encoder.h264;
+    const auto baseline_label = is_pyrowave ? "pyrowave"sv : "h264"sv;
+    BOOST_LOG(debug) << "------  "sv << baseline_label << "  ------"sv;
     for (int x = 0; x < encoder_t::MAX_FLAGS; ++x) {
       auto flag = (encoder_t::flag_e) x;
-      BOOST_LOG(debug) << encoder_t::from_flag(flag) << (encoder.h264[flag] ? ": supported"sv : ": unsupported"sv);
+      BOOST_LOG(debug) << encoder_t::from_flag(flag) << (baseline[flag] ? ": supported"sv : ": unsupported"sv);
     }
     BOOST_LOG(debug) << "-------------------"sv;
-    BOOST_LOG(info) << "Found H.264 encoder: "sv << encoder.h264.name << " ["sv << encoder.name << ']';
+    BOOST_LOG(info) << "Found "sv << baseline_label << " encoder: "sv << baseline.name << " ["sv << encoder.name << ']';
 
     if (encoder.hevc[encoder_t::PASSED]) {
       BOOST_LOG(debug) << "------  hevc ------"sv;
