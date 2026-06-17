@@ -20,6 +20,8 @@
 #include <array>
 #include <cstring>
 #include <drm_fourcc.h>
+#include <sys/stat.h>
+#include <unordered_map>
 
 // PyroWave headers
 #include "pyrowave_encoder.hpp"
@@ -120,6 +122,7 @@ struct session_t::impl_t {
     bool views_created = false;
     bool target_initialized = false;
     bool descriptors_dirty = true;
+    bool have_encoded_frame = false;
 
     // DMA-BUF source
     struct SrcImage {
@@ -127,8 +130,27 @@ struct session_t::impl_t {
       VkDeviceMemory mem = VK_NULL_HANDLE;
       VkImageView view = VK_NULL_HANDLE;
       int width = 0, height = 0;
-    } src;
+    } src;  // currently-bound buffer (non-owning view into src_cache)
     uint64_t src_sequence = 0;
+
+    // Imported DMA-BUF cache. The compositor (kwin/pipewire) rotates a small
+    // pool of dmabufs, so importing one VkImage per captured frame churns
+    // vkCreateImage/vkAllocateMemory every frame and inflates host latency
+    // under motion. Cache imports keyed by the dmabuf's inode (stable across
+    // the pool's rotation) and just rebind the descriptor when the buffer
+    // changes. Owns the VkImage/VkDeviceMemory/VkImageView; src points into it.
+    struct CachedSrc {
+      VkImage image = VK_NULL_HANDLE;
+      VkDeviceMemory mem = VK_NULL_HANDLE;
+      VkImageView view = VK_NULL_HANDLE;
+      int width = 0, height = 0;
+      uint32_t fourcc = 0;
+      uint64_t modifier = 0;
+      uint64_t last_used = 0;
+    };
+    std::unordered_map<ino_t, CachedSrc> src_cache;
+    uint64_t src_use_counter = 0;
+    static constexpr size_t max_src_cache = 16;
 
     // Cursor
     struct CursorImage {
@@ -323,7 +345,36 @@ struct session_t::impl_t {
     // Transition YCbCr planes to SHADER_READ_ONLY for PyroWave.
     transition_yuv_for_encode(raw_cmd);
 
-    // PyroWave encode (recorded on the same Granite command buffer).
+    // PyroWave encode + packetize on this command buffer.
+    return submit_encode_packetize(cmd);
+  }
+
+  // ------------------------------------------------------------------
+  // Re-encode the most recently converted frame.
+  //
+  // Sunshine's encode loop calls encode() once per iteration but only calls
+  // convert() when a fresh captured frame is available. With static content
+  // (no damage events) convert() is skipped, yet a packet is still expected so
+  // the stream keeps a minimum FPS. Hardware encoders re-emit the previous
+  // frame internally; PyroWave produces its bitstream inside convert(), so we
+  // re-run the encode on the YCbCr planes that still hold the last frame.
+  // ------------------------------------------------------------------
+  int encode_repeat() {
+    if (!raw.have_encoded_frame)
+      return -1;  // nothing to repeat yet
+
+    auto cmd = dev.request_command_buffer();
+    // yuv_images are already in SHADER_READ_ONLY_OPTIMAL from the previous
+    // encode and untouched since, so no layout transition is needed.
+    return submit_encode_packetize(cmd);
+  }
+
+  // ------------------------------------------------------------------
+  // PyroWave encode of the current YCbCr planes, copy to host, submit, wait,
+  // and packetize into pending_bitstream. Assumes the planes are already in
+  // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
+  // ------------------------------------------------------------------
+  int submit_encode_packetize(Vulkan::CommandBufferHandle cmd) {
     PyroWave::Encoder::BitstreamBuffers buffers = {};
     buffers.meta.buffer      = meta_dev.get();
     buffers.meta.size        = meta_dev->get_create_info().size;
@@ -375,6 +426,7 @@ struct session_t::impl_t {
       memcpy(pending_bitstream.data() + offset, reordered.data() + p.offset, p.size);
       offset += p.size;
     }
+    raw.have_encoded_frame = true;
     return 0;
   }
 
@@ -545,9 +597,56 @@ struct session_t::impl_t {
     }
   }
 
+  // Import a DMA-BUF, reusing a previously-imported VkImage when the compositor
+  // hands back a buffer from its pool. Keyed by the dmabuf inode, which is
+  // stable across the pool's rotation, so under motion we rebind the descriptor
+  // instead of recreating a VkImage + VkDeviceMemory every frame.
   bool import_dmabuf(const egl::surface_descriptor_t &sd) {
-    destroy_src_image();
+    // Stable identity for the underlying buffer object. The inode repeats as the
+    // compositor cycles its pool; fall back to the fd number if fstat fails.
+    ino_t key = static_cast<ino_t>(sd.fds[0]);
+    struct stat st = {};
+    if (sd.fds[0] >= 0 && fstat(sd.fds[0], &st) == 0 && st.st_ino != 0)
+      key = st.st_ino;
 
+    auto it = raw.src_cache.find(key);
+    if (it != raw.src_cache.end()) {
+      auto &c = it->second;
+      // Only reuse if geometry/format are unchanged (a pooled buffer's identity
+      // could in principle be recycled for a different surface).
+      if (c.width == sd.width && c.height == sd.height &&
+          c.fourcc == sd.fourcc && c.modifier == sd.modifier) {
+        c.last_used = ++raw.src_use_counter;
+        bind_src(c);
+        return true;
+      }
+      destroy_cached_src(c);
+      raw.src_cache.erase(it);
+    }
+
+    RawPipeline::CachedSrc entry = {};
+    if (!create_src_image(sd, entry))
+      return false;
+    entry.last_used = ++raw.src_use_counter;
+
+    auto [ins, _] = raw.src_cache.emplace(key, entry);
+    bind_src(ins->second);
+    evict_src_cache_if_needed();
+    return true;
+  }
+
+  // Point raw.src at a cached buffer and flag the descriptor for rebind.
+  void bind_src(const RawPipeline::CachedSrc &c) {
+    raw.src.image  = c.image;
+    raw.src.mem    = c.mem;
+    raw.src.view   = c.view;
+    raw.src.width  = c.width;
+    raw.src.height = c.height;
+    raw.descriptors_dirty = true;
+  }
+
+  // Create a fresh imported VkImage/VkDeviceMemory/VkImageView for `sd`.
+  bool create_src_image(const egl::surface_descriptor_t &sd, RawPipeline::CachedSrc &out) {
     VkFormat src_format = vk_format_from_fourcc(sd.fourcc);
     {
       uint32_t f = sd.fourcc;
@@ -611,10 +710,10 @@ struct session_t::impl_t {
     img_ci.usage       = VK_IMAGE_USAGE_SAMPLED_BIT;
     img_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VK_CHECK_LOG(vkCreateImage(raw.dev, &img_ci, nullptr, &raw.src.image), false);
+    VK_CHECK_LOG(vkCreateImage(raw.dev, &img_ci, nullptr, &out.image), false);
 
     VkMemoryRequirements mem_req;
-    vkGetImageMemoryRequirements(raw.dev, raw.src.image, &mem_req);
+    vkGetImageMemoryRequirements(raw.dev, out.image, &mem_req);
 
     VkImportMemoryFdInfoKHR import_fd = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
     import_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
@@ -627,20 +726,53 @@ struct session_t::impl_t {
       fd_props.memoryTypeBits ? fd_props.memoryTypeBits : mem_req.memoryTypeBits,
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    VK_CHECK_LOG(vkAllocateMemory(raw.dev, &alloc_info, nullptr, &raw.src.mem), false);
-    vkBindImageMemory(raw.dev, raw.src.image, raw.src.mem, 0);
+    VK_CHECK_LOG(vkAllocateMemory(raw.dev, &alloc_info, nullptr, &out.mem), false);
+    vkBindImageMemory(raw.dev, out.image, out.mem, 0);
 
     VkImageViewCreateInfo view_ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    view_ci.image = raw.src.image;
+    view_ci.image = out.image;
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_ci.format   = src_format;
     view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VK_CHECK_LOG(vkCreateImageView(raw.dev, &view_ci, nullptr, &raw.src.view), false);
+    VK_CHECK_LOG(vkCreateImageView(raw.dev, &view_ci, nullptr, &out.view), false);
 
-    raw.src.width  = sd.width;
-    raw.src.height = sd.height;
-    raw.descriptors_dirty = true;
+    out.width    = sd.width;
+    out.height   = sd.height;
+    out.fourcc   = sd.fourcc;
+    out.modifier = sd.modifier;
     return true;
+  }
+
+  void destroy_cached_src(RawPipeline::CachedSrc &c) {
+    if (c.view)  { vkDestroyImageView(raw.dev, c.view, nullptr); c.view = VK_NULL_HANDLE; }
+    if (c.image) { vkDestroyImage(raw.dev, c.image, nullptr);    c.image = VK_NULL_HANDLE; }
+    if (c.mem)   { vkFreeMemory(raw.dev, c.mem, nullptr);        c.mem = VK_NULL_HANDLE; }
+  }
+
+  // Bound the cache by evicting the least-recently-used entries. Pools are tiny
+  // (a handful of buffers), so this only triggers if a backend keeps minting
+  // fresh buffers. Never evicts the currently-bound buffer.
+  void evict_src_cache_if_needed() {
+    while (raw.src_cache.size() > RawPipeline::max_src_cache) {
+      auto lru = raw.src_cache.end();
+      for (auto it = raw.src_cache.begin(); it != raw.src_cache.end(); ++it) {
+        if (it->second.image == raw.src.image)
+          continue;  // don't evict the buffer in use this frame
+        if (lru == raw.src_cache.end() || it->second.last_used < lru->second.last_used)
+          lru = it;
+      }
+      if (lru == raw.src_cache.end())
+        break;
+      destroy_cached_src(lru->second);
+      raw.src_cache.erase(lru);
+    }
+  }
+
+  void destroy_src_cache() {
+    for (auto &kv : raw.src_cache)
+      destroy_cached_src(kv.second);
+    raw.src_cache.clear();
+    raw.src = {};
   }
 
   bool create_yuv_storage_views() {
@@ -710,12 +842,6 @@ struct session_t::impl_t {
     if (raw.cursor.view)  { vkDestroyImageView(raw.dev, raw.cursor.view, nullptr); raw.cursor.view = VK_NULL_HANDLE; }
     if (raw.cursor.image) { vkDestroyImage(raw.dev, raw.cursor.image, nullptr);    raw.cursor.image = VK_NULL_HANDLE; }
     if (raw.cursor.mem)   { vkFreeMemory(raw.dev, raw.cursor.mem, nullptr);        raw.cursor.mem = VK_NULL_HANDLE; }
-  }
-
-  void destroy_src_image() {
-    if (raw.src.view)  { vkDestroyImageView(raw.dev, raw.src.view, nullptr); raw.src.view = VK_NULL_HANDLE; }
-    if (raw.src.image) { vkDestroyImage(raw.dev, raw.src.image, nullptr);    raw.src.image = VK_NULL_HANDLE; }
-    if (raw.src.mem)   { vkFreeMemory(raw.dev, raw.src.mem, nullptr);        raw.src.mem = VK_NULL_HANDLE; }
   }
 
   void update_descriptors() {
@@ -813,7 +939,7 @@ struct session_t::impl_t {
   void cleanup() {
     if (!raw.dev) return;
     vkDeviceWaitIdle(raw.dev);
-    destroy_src_image();
+    destroy_src_cache();
     destroy_cursor_image();
     if (raw.y_view)          vkDestroyImageView(raw.dev, raw.y_view,          nullptr);
     if (raw.cb_view)         vkDestroyImageView(raw.dev, raw.cb_view,         nullptr);
@@ -849,6 +975,11 @@ void session_t::request_normal_frame()                       {}
 void session_t::invalidate_ref_frames(int64_t, int64_t)      {}
 
 std::vector<uint8_t> session_t::take_bitstream() {
+  // Static content: the encode loop skips convert() when no fresh frame is
+  // available, so pending_bitstream is empty. Re-encode the last frame to keep
+  // the stream alive at the minimum FPS instead of emitting an empty packet.
+  if (impl->pending_bitstream.empty())
+    impl->encode_repeat();
   return std::move(impl->pending_bitstream);
 }
 
