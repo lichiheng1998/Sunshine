@@ -544,20 +544,35 @@ struct session_t::impl_t {
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 3, dst_barriers.data());
 
-    // Fill per-frame push constants.
+    // Fit the captured frame into the (client-requested) output size, preserving
+    // aspect ratio. When src and dst already match (virtual display sized to the
+    // client) this is a 1:1 copy with no letterbox.
+    float src_ar = static_cast<float>(raw.src.width) / raw.src.height;
+    float dst_ar = static_cast<float>(frame_width) / frame_height;
+    int content_w, content_h;
+    if (src_ar > dst_ar) {
+      content_w = frame_width;
+      content_h = static_cast<int>(frame_width / src_ar + 0.5f);
+    } else {
+      content_h = frame_height;
+      content_w = static_cast<int>(frame_height * src_ar + 0.5f);
+    }
+    int off_x = (frame_width - content_w) / 2;
+    int off_y = (frame_height - content_h) / 2;
+
     push.src_offset = {0, 0};
     push.src_size   = {raw.src.width, raw.src.height};
-    push.dst_offset = {0, 0};
-    push.dst_size   = {frame_width, frame_height};
+    push.dst_offset = {off_x, off_y};
+    push.dst_size   = {content_w, content_h};
     push.dst_full_size = {frame_width, frame_height};
     push.y_invert   = descriptor.y_invert ? 1 : 0;
     if (!descriptor.buffer.empty()) {
-      float sx = static_cast<float>(frame_width)  / raw.src.width;
-      float sy = static_cast<float>(frame_height) / raw.src.height;
-      push.cursor_pos  = {static_cast<int32_t>(descriptor.x  * sx),
-                          static_cast<int32_t>(descriptor.y  * sy)};
-      push.cursor_size = {static_cast<int32_t>(descriptor.src_w * sx),
-                          static_cast<int32_t>(descriptor.src_h * sy)};
+      // Cursor lives in source coordinates; map through the same fit transform.
+      float s = static_cast<float>(content_w) / raw.src.width;  // == content_h/src.height
+      push.cursor_pos  = {off_x + static_cast<int32_t>(descriptor.x * s),
+                          off_y + static_cast<int32_t>(descriptor.y * s)};
+      push.cursor_size = {static_cast<int32_t>(descriptor.src_w * s),
+                          static_cast<int32_t>(descriptor.src_h * s)};
     } else {
       push.cursor_size = {0, 0};
     }

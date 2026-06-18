@@ -2074,7 +2074,11 @@ namespace video {
     }
 #ifdef SUNSHINE_BUILD_PYROWAVE
     else if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
-      return pyrowave::make_session(width, height, config, encode_device->colorspace);
+      // Encode at the client-requested resolution (config.width/height), not the
+      // capture/display size. The RGB->YCbCr compute pass scales (and letterboxes)
+      // the captured frame into this size, mirroring the avcodec sws path. When
+      // capturing a virtual display sized to the client, these already match.
+      return pyrowave::make_session(config.width, config.height, config, encode_device->colorspace);
     }
 #endif
 
