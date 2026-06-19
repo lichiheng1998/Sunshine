@@ -55,6 +55,7 @@
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/video.h"
 #include "vaapi.h"
 
 #ifdef __GNUC__
@@ -1090,6 +1091,19 @@ namespace platf {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#ifdef SUNSHINE_BUILD_KWIN
+    // A launched app may request a virtual display: on KDE/Wayland, create and
+    // capture a virtual output sized to the client via KWin's ScreenCast,
+    // regardless of the configured/auto-selected default capture backend.
+    if (config.virtual_display && window_system == window_system_e::WAYLAND && kwin_available()) {
+      BOOST_LOG(info) << "Virtual display requested -> KWin virtual output"sv;
+      if (auto d = kwin_display(hwdevice_type, display_name, config)) {
+        return d;
+      }
+      BOOST_LOG(warning) << "KWin virtual display failed; falling back to default capture"sv;
+    }
+#endif
+
     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
 #ifdef SUNSHINE_BUILD_DRM
     if (sources[source::KMS]) {

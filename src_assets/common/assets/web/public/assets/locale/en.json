@@ -97,6 +97,8 @@
     "sort_descending": "Descending",
     "wait_all": "Continue streaming until all app processes exit",
     "wait_all_desc": "This will continue streaming until all processes started by the app have terminated. When unchecked, streaming will stop when the initial app process exits, even if other app processes are still running.",
+    "virtual_display": "Run on a virtual display",
+    "virtual_display_desc": "Create a temporary virtual display sized to the client's resolution and stream that instead of a physical monitor. Requires KDE Plasma on Wayland; the virtual display is created when the app launches and removed automatically when the session ends.",
     "working_dir": "Working Directory",
     "working_dir_desc": "The working directory that should be passed to the process. For example, some applications use the working directory to search for configuration files. If not set, Sunshine will default to the parent directory of the command"
   },

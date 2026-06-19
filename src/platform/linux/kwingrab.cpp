@@ -14,6 +14,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <pwd.h>
 #include <ranges>
 #include <string>
@@ -21,6 +22,12 @@
 #include <thread>
 
 // lib includes
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/io.hpp>
+#include <boost/process/v1/search_path.hpp>
+#include <boost/process/v1/system.hpp>
+#include <nlohmann/json.hpp>
 #include <pipewire/pipewire.h>
 #include <poll.h>
 #include <unistd.h>
@@ -40,6 +47,154 @@
 using namespace std::literals;
 
 namespace kwin {
+  namespace bp = boost::process::v1;
+
+  /**
+   * @brief Enable or disable physical outputs via kscreen-doctor.
+   *
+   * Used in virtual-display mode to blank the physical monitors while streaming
+   * (so the desktop relocates onto the virtual output) and to restore them when
+   * the session ends. There is no client-side Wayland protocol to toggle
+   * outputs, so we shell out to KDE's kscreen-doctor, matching the behavior of
+   * the standalone helper scripts.
+   */
+  inline void set_physical_outputs_enabled(const std::vector<std::string> &names, bool enable) {
+    if (names.empty()) {
+      return;
+    }
+    auto exe = bp::search_path("kscreen-doctor");
+    if (exe.empty()) {
+      BOOST_LOG(warning) << "[kwingrab] kscreen-doctor not found; cannot "sv
+                         << (enable ? "restore"sv : "disable"sv) << " physical outputs"sv;
+      return;
+    }
+    std::vector<std::string> args;
+    args.reserve(names.size());
+    for (const auto &name : names) {
+      args.emplace_back("output." + name + (enable ? ".enable" : ".disable"));
+    }
+    std::error_code ec;
+    bp::system(exe, bp::args(args), bp::std_out > bp::null, bp::std_err > bp::null, ec);
+    if (ec) {
+      BOOST_LOG(warning) << "[kwingrab] kscreen-doctor failed to "sv
+                         << (enable ? "restore"sv : "disable"sv) << " outputs: "sv << ec.message();
+    } else {
+      BOOST_LOG(info) << "[kwingrab] "sv << (enable ? "restored"sv : "disabled"sv)
+                      << " physical outputs ("sv << args.size() << ")"sv;
+    }
+  }
+
+  /**
+   * @brief Run kscreen-doctor --json and return its stdout (empty on failure).
+   */
+  inline std::string kscreen_doctor_json() {
+    auto exe = bp::search_path("kscreen-doctor");
+    if (exe.empty()) {
+      return {};
+    }
+    std::error_code ec;
+    bp::ipstream out;
+    bp::child c(exe, "--json", bp::std_out > out, bp::std_err > bp::null, ec);
+    if (ec) {
+      return {};
+    }
+    std::stringstream ss;
+    ss << out.rdbuf();
+    c.wait();
+    return ss.str();
+  }
+
+  /**
+   * @brief Make the freshly-created virtual output run at the client's refresh
+   *        rate. stream_virtual_output() only sets resolution, so KWin picks a
+   *        default rate (usually 60 Hz); register a custom mode at the requested
+   *        rate and switch to it.
+   * @param physical_names Output names that existed before the virtual one, used
+   *                       to identify the new (virtual) output by exclusion.
+   * @param width,height   Virtual display resolution.
+   * @param fps_millihertz Requested refresh rate in mHz (e.g. 90 fps = 90000).
+   */
+  inline void apply_virtual_output_refresh(const std::vector<std::string> &physical_names,
+                                           int width, int height, int fps_millihertz) {
+    auto exe = bp::search_path("kscreen-doctor");
+    if (exe.empty() || fps_millihertz <= 0) {
+      return;
+    }
+
+    // Identify the virtual output: the one not present before we created it.
+    std::string vname;
+    try {
+      auto j = nlohmann::json::parse(kscreen_doctor_json(), nullptr, false);
+      if (j.is_discarded() || !j.contains("outputs")) {
+        return;
+      }
+      for (const auto &o : j["outputs"]) {
+        const auto name = o.value("name", std::string {});
+        if (!name.empty() &&
+            std::find(physical_names.begin(), physical_names.end(), name) == physical_names.end()) {
+          vname = name;
+          break;
+        }
+      }
+    } catch (...) {
+      return;
+    }
+    if (vname.empty()) {
+      BOOST_LOG(warning) << "[kwingrab] could not identify virtual output for refresh-rate setup"sv;
+      return;
+    }
+
+    // Register the custom mode (resolution + refresh) on the virtual output.
+    {
+      std::error_code ec;
+      bp::system(exe,
+                 "output." + vname + ".addCustomMode." + std::to_string(width) + "." +
+                   std::to_string(height) + "." + std::to_string(fps_millihertz),
+                 bp::std_out > bp::null, bp::std_err > bp::null, ec);
+    }
+
+    // addCustomMode only registers the mode; find its id and switch to it.
+    const double want_fps = fps_millihertz / 1000.0;
+    std::string mode_id;
+    try {
+      auto j = nlohmann::json::parse(kscreen_doctor_json(), nullptr, false);
+      if (!j.is_discarded() && j.contains("outputs")) {
+        for (const auto &o : j["outputs"]) {
+          if (o.value("name", std::string {}) != vname) {
+            continue;
+          }
+          for (const auto &m : o.value("modes", nlohmann::json::array())) {
+            const auto &size = m.value("size", nlohmann::json::object());
+            if (size.value("width", 0) == width && size.value("height", 0) == height &&
+                std::abs(m.value("refreshRate", 0.0) - want_fps) < 1.0) {
+              mode_id = m.value("id", std::string {});
+              break;
+            }
+          }
+          break;
+        }
+      }
+    } catch (...) {
+      return;
+    }
+
+    if (mode_id.empty()) {
+      BOOST_LOG(warning) << "[kwingrab] no matching custom mode for "sv << width << "x"sv << height
+                         << "@"sv << want_fps << " on "sv << vname;
+      return;
+    }
+
+    std::error_code ec;
+    bp::system(exe, "output." + vname + ".mode." + mode_id,
+               bp::std_out > bp::null, bp::std_err > bp::null, ec);
+    if (ec) {
+      BOOST_LOG(warning) << "[kwingrab] failed to set mode "sv << mode_id << " on "sv << vname;
+    } else {
+      BOOST_LOG(info) << "[kwingrab] virtual output "sv << vname << " set to "sv << width << "x"sv
+                      << height << "@"sv << want_fps << "Hz (mode "sv << mode_id << ")"sv;
+    }
+  }
+
   /**
    * KWin Wayland ScreenCast permissions
    *
@@ -439,6 +594,60 @@ namespace kwin {
       return 0;
     }
 
+    /**
+     * @brief Create a virtual output at the given size and stream it.
+     *
+     * KWin allocates a brand-new virtual output (no physical display involved)
+     * and tears it down automatically when the stream is closed, so there is no
+     * external tool, no mode juggling, and no cleanup to do on disconnect.
+     * @param name   Output name KWin assigns to the virtual display.
+     * @param width  Virtual display width in pixels (client resolution).
+     * @param height Virtual display height in pixels (client resolution).
+     * @return 0 on success.
+     */
+    int start_virtual(const std::string_view &name, int width, int height) {
+      if (!kde_screencast_v1_) {
+        BOOST_LOG(error) << "[kwingrab] zkde_screencast_unstable_v1 not found in registry; "
+                            "cannot create a virtual display."sv;
+        return -1;
+      }
+      if (width <= 0 || height <= 0) {
+        BOOST_LOG(error) << "[kwingrab] invalid virtual display size "sv << width << "x"sv << height;
+        return -1;
+      }
+
+      const std::string name_str {name};
+      kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_virtual_output(
+        kde_screencast_v1_, name_str.c_str(), width, height,
+        wl_fixed_from_int(1), ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+      zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
+
+      if (wait_for_stream() < 0) {
+        return -1;
+      }
+      if (stream_failed) {
+        BOOST_LOG(error) << "[kwingrab] stream_virtual_output failed: "sv << stream_error_msg;
+        return -1;
+      }
+      if (out_node_id == PW_ID_ANY && (out_objectserial & SPA_ID_INVALID) == SPA_ID_INVALID) {
+        BOOST_LOG(error) << "[kwingrab] timeout waiting for created event (virtual output)"sv;
+        return -1;
+      }
+
+      // No wl_output to read back from: the dimensions are exactly what we asked
+      // KWin to create, so synthesize the params the rest of the pipeline needs.
+      out_params = std::make_shared<output_parameter_t>();
+      out_params->name = name_str;
+      out_params->width = width;
+      out_params->height = height;
+      out_params->pos_x = 0;
+      out_params->pos_y = 0;
+
+      BOOST_LOG(info) << "[kwingrab] virtual output created "sv << width << "x"sv << height
+                      << " name "sv << name_str << " PipeWire node "sv << out_node_id;
+      return 0;
+    }
+
     uint32_t out_node_id = PW_ID_ANY;
     uint64_t out_objectserial = SPA_ID_INVALID;
     std::shared_ptr<output_parameter_t> out_params = nullptr;
@@ -639,44 +848,215 @@ namespace kwin {
   };
 
   /**
+   * @brief Process-global owner of a persistent KWin virtual output.
+   *
+   * A virtual output must outlive the individual streaming session that created
+   * it. KWin destroys a virtual output the moment its screencast stream (and the
+   * Wayland connection holding it) goes away. If we bound that lifetime to each
+   * kwin_t/RTSP session, every bitrate change or disconnect/resume would hot-
+   * unplug the output a fullscreen game is pinned to, forcing KWin to migrate
+   * the surface across outputs mid-flight. Many games can't survive that and the
+   * compositor ends up SIGTRAP-killing the client.
+   *
+   * Instead this singleton keeps the screencast connection (and thus the virtual
+   * output and its PipeWire node) alive across sessions. A new session simply
+   * reattaches to the same node. It is only torn down when the app truly stops
+   * (proc::proc.terminate() -> platf::virtual_display_teardown()), at which point
+   * the physical monitors blanked at creation are restored.
+   */
+  class virtual_display_manager_t {
+  public:
+    static virtual_display_manager_t &get() {
+      static virtual_display_manager_t instance;
+      return instance;
+    }
+
+    /**
+     * @brief Ensure a virtual output of the requested geometry exists, creating
+     *        it (and blanking the physical monitors) on first use.
+     *
+     * Reuses the existing output when the geometry is unchanged. If the client
+     * requested a different resolution/refresh, the old output is torn down and
+     * a fresh one created so the stream matches the new request.
+     *
+     * @return 0 on success; fills out_node_id/out_objectserial/out_params.
+     */
+    int acquire(int width, int height, int fps_mhz,
+                uint32_t &out_node_id, uint64_t &out_objectserial,
+                std::shared_ptr<output_parameter_t> &out_params) {
+      std::lock_guard lk {mutex_};
+
+      if (active_ && (width != width_ || height != height_ || fps_mhz != fps_mhz_)) {
+        BOOST_LOG(info) << "[kwingrab] virtual output geometry changed ("sv
+                        << width_ << "x"sv << height_ << "@"sv << fps_mhz_ << "mHz -> "sv
+                        << width << "x"sv << height << "@"sv << fps_mhz
+                        << "mHz); recreating"sv;
+        teardown_locked();
+      }
+
+      if (active_) {
+        BOOST_LOG(info) << "[kwingrab] reusing persistent virtual output "sv
+                        << width_ << "x"sv << height_ << " PipeWire node "sv << node_id_;
+        out_node_id = node_id_;
+        out_objectserial = objectserial_;
+        out_params = params_;
+        return 0;
+      }
+
+      auto sc = std::make_unique<screencast_t>();
+      if (sc->init(true) < 0) {
+        return -1;
+      }
+#if !defined(__FreeBSD__)
+      if (!sc->is_kwin_screencasting_available()) {
+        BOOST_LOG(warning) << "[kwingrab] KWin screencasting unavailable; dropping privileges and retrying"sv;
+        platf::drop_elevated_privileges(true);
+        sc = std::make_unique<screencast_t>();
+        if (sc->init(true) < 0) {
+          return -1;
+        }
+      }
+#endif
+      // Capture physical output names before KWin adds the virtual one.
+      disabled_outputs_ = sc->get_output_names();
+      if (sc->start_virtual("Sunshine", width, height) < 0) {
+        return -1;
+      }
+      // stream_virtual_output only sets resolution; match the client refresh.
+      apply_virtual_output_refresh(disabled_outputs_, width, height, fps_mhz);
+      // Blank the physical monitors so the desktop relocates onto the virtual
+      // output. Restored in teardown() when the app stops.
+      set_physical_outputs_enabled(disabled_outputs_, false);
+
+      if (!sc->out_params) {
+        return -1;
+      }
+
+      screencast_ = std::move(sc);
+      width_ = width;
+      height_ = height;
+      fps_mhz_ = fps_mhz;
+      node_id_ = screencast_->out_node_id;
+      objectserial_ = screencast_->out_objectserial;
+      params_ = screencast_->out_params;
+      active_ = true;
+
+      out_node_id = node_id_;
+      out_objectserial = objectserial_;
+      out_params = params_;
+      return 0;
+    }
+
+    /**
+     * @brief Destroy the virtual output and restore the physical monitors.
+     *        Called when the app truly stops, not on session teardown.
+     */
+    void teardown() {
+      std::lock_guard lk {mutex_};
+      teardown_locked();
+    }
+
+  private:
+    void teardown_locked() {
+      if (!active_) {
+        return;
+      }
+      BOOST_LOG(info) << "[kwingrab] tearing down persistent virtual output "sv
+                      << width_ << "x"sv << height_;
+      // Restore physical outputs before dropping the screencast so a real output
+      // exists the moment the virtual one disappears (avoids a no-output gap).
+      if (!disabled_outputs_.empty()) {
+        set_physical_outputs_enabled(disabled_outputs_, true);
+      }
+      screencast_.reset();
+      disabled_outputs_.clear();
+      params_.reset();
+      node_id_ = PW_ID_ANY;
+      objectserial_ = SPA_ID_INVALID;
+      width_ = height_ = fps_mhz_ = 0;
+      active_ = false;
+    }
+
+    std::mutex mutex_;
+    std::unique_ptr<screencast_t> screencast_;
+    std::vector<std::string> disabled_outputs_;
+    std::shared_ptr<output_parameter_t> params_;
+    uint32_t node_id_ = PW_ID_ANY;
+    uint64_t objectserial_ = SPA_ID_INVALID;
+    int width_ = 0;
+    int height_ = 0;
+    int fps_mhz_ = 0;
+    bool active_ = false;
+  };
+
+  /**
    * Display backend
    *
    * Orchestrates screencast_t and implements pipewire_display_t
    */
   class kwin_t: public pipewire::pipewire_display_t {
   public:
+    // Shadows pipewire_display_t::init to capture the per-session request before
+    // delegating. configure_stream() (below) has no access to config otherwise.
+    int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
+      virtual_display_ = config.virtual_display;
+      req_width_ = config.width;
+      req_height_ = config.height;
+      // Refresh rate in millihertz; framerateX100 carries fractional rates.
+      req_fps_mhz_ = config.framerateX100 > 0 ? config.framerateX100 * 10 : config.framerate * 1000;
+      return pipewire::pipewire_display_t::init(hwdevice_type, display_name, config);
+    }
+
     int configure_stream(const std::string &display_name, int &out_pipewire_fd, uint32_t &out_pipewire_node, uint64_t &out_pipewire_objectserial) override {
-      screencast = std::make_unique<screencast_t>();
-      if (screencast->init(true) < 0) {
-        return -1;
-      }
-#if !defined(__FreeBSD__)
-      // Check if KWin screencasting extension is accessible after first init attempt
-      if (!screencast->is_kwin_screencasting_available()) {
-        // KWin screencasting extension was not found. Drop ALL elevated privileges in case KWin is missing CAP_SYS_NICE
-        BOOST_LOG(warning) << "[kwingrab] KWin screencasting unavailable after init. Trying again after dropping ALL elevated privileges."sv;
-        platf::drop_elevated_privileges(true);
-        // Retry screencast session init after privilege drop
-        screencast.reset();  // Cleanup current screencast instance
-        screencast = std::make_unique<screencast_t>();  // Create new screencast instance
+      uint32_t node_id = PW_ID_ANY;
+      uint64_t objectserial = SPA_ID_INVALID;
+      std::shared_ptr<output_parameter_t> params;
+
+      if (virtual_display_) {
+        // The virtual output is process-global and persists across sessions so a
+        // fullscreen app is never hot-unplugged on a bitrate change or resume.
+        // We don't own a screencast_t here; the manager keeps it alive.
+        if (virtual_display_manager_t::get().acquire(req_width_, req_height_, req_fps_mhz_,
+                                                     node_id, objectserial, params) < 0) {
+          return -1;
+        }
+      } else {
+        screencast = std::make_unique<screencast_t>();
         if (screencast->init(true) < 0) {
           return -1;
         }
-      }
+#if !defined(__FreeBSD__)
+        // Check if KWin screencasting extension is accessible after first init attempt
+        if (!screencast->is_kwin_screencasting_available()) {
+          // KWin screencasting extension was not found. Drop ALL elevated privileges in case KWin is missing CAP_SYS_NICE
+          BOOST_LOG(warning) << "[kwingrab] KWin screencasting unavailable after init. Trying again after dropping ALL elevated privileges."sv;
+          platf::drop_elevated_privileges(true);
+          // Retry screencast session init after privilege drop
+          screencast.reset();  // Cleanup current screencast instance
+          screencast = std::make_unique<screencast_t>();  // Create new screencast instance
+          if (screencast->init(true) < 0) {
+            return -1;
+          }
+        }
 #endif
-      if (screencast->start(display_name) < 0) {
-        return -1;
+        if (screencast->start(display_name) < 0) {
+          return -1;
+        }
+        node_id = screencast->out_node_id;
+        objectserial = screencast->out_objectserial;
+        params = screencast->out_params;
       }
-      if (screencast->out_params) {
+
+      if (params) {
         // Return values for pipewire init
         out_pipewire_fd = -1;  // KWin screencast capture runs on the local pipewire core
-        out_pipewire_node = screencast->out_node_id;
-        out_pipewire_objectserial = screencast->out_objectserial;
+        out_pipewire_node = node_id;
+        out_pipewire_objectserial = objectserial;
         // Set/update basic stream parameters on display_t
-        this->offset_x = screencast->out_params->pos_x;
-        this->offset_y = screencast->out_params->pos_y;
-        this->width = screencast->out_params->width;
-        this->height = screencast->out_params->height;
+        this->offset_x = params->pos_x;
+        this->offset_y = params->pos_y;
+        this->width = params->width;
+        this->height = params->height;
         this->logical_width = 0;  // Explicitly mark for pipewire_display_t to try to figure this out.
         this->logical_height = 0;  // Explicitly Mark for pipewire_display_t to try to figure this out.
         return 0;
@@ -684,7 +1064,17 @@ namespace kwin {
       return -1;
     }
 
+    ~kwin_t() override {
+      // The virtual output (and the physical-output blanking) is owned by the
+      // process-global manager so it survives session restarts. It is torn down
+      // only when the app stops, via platf::virtual_display_teardown().
+    }
+
     std::unique_ptr<screencast_t> screencast;
+    bool virtual_display_ = false;
+    int req_width_ = 0;
+    int req_height_ = 0;
+    int req_fps_mhz_ = 0;
   };
 }  // namespace kwin
 
@@ -702,6 +1092,10 @@ namespace platf {
     }
 
     return display;
+  }
+
+  void kwin_virtual_display_teardown() {
+    kwin::virtual_display_manager_t::get().teardown();
   }
 
   std::vector<std::string> kwin_display_names() {

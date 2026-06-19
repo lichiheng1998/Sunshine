@@ -8,6 +8,11 @@
       "image-path": "desktop.png"
     },
     {
+      "name": "Virtual Desktop",
+      "image-path": "desktop.png",
+      "virtual-display": true
+    },
+    {
       "name": "Low Res Desktop",
       "image-path": "desktop.png",
       "prep-cmd": [

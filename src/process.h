@@ -66,6 +66,7 @@ namespace proc {
     bool elevated;
     bool auto_detach;
     bool wait_all;
+    bool virtual_display;  // Capture a freshly-created virtual display (KDE/Wayland) instead of a physical output
     std::chrono::seconds exit_timeout;
   };
 
@@ -95,6 +96,11 @@ namespace proc {
     std::vector<ctx_t> &get_apps();
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
+
+    /**
+     * @return Whether the currently running app requested a virtual display.
+     */
+    bool get_virtual_display() const;
     void terminate();
 
   private:

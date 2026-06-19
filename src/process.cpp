@@ -39,6 +39,14 @@
   #include <share.h>
 #endif
 
+#ifdef SUNSHINE_BUILD_KWIN
+// Defined in platform/linux/kwingrab.cpp. Destroys a persistent virtual display
+// (KDE/Wayland) and restores the physical monitors when the app stops.
+namespace platf {
+  void kwin_virtual_display_teardown();
+}
+#endif
+
 namespace proc {
   using namespace std::literals;
   namespace pt = boost::property_tree;
@@ -339,6 +347,13 @@ namespace proc {
 
     _pipe.reset();
 
+    // Tear down any persistent virtual display now that the app has stopped.
+    // (Kept alive across session restarts / bitrate changes so a fullscreen app
+    // is never hot-unplugged mid-stream.) Linux/KWin only.
+#ifdef SUNSHINE_BUILD_KWIN
+    platf::kwin_virtual_display_teardown();
+#endif
+
     bool has_run = _app_id > 0;
 
     // Only show the Stopped notification if we actually have an app to stop
@@ -377,6 +392,10 @@ namespace proc {
 
   std::string proc_t::get_last_run_app_name() {
     return _app.name;
+  }
+
+  bool proc_t::get_virtual_display() const {
+    return _app.virtual_display;
   }
 
   proc_t::~proc_t() {
@@ -650,6 +669,7 @@ namespace proc {
         auto auto_detach = app_node.get_optional<bool>("auto-detach"s);
         auto wait_all = app_node.get_optional<bool>("wait-all"s);
         auto exit_timeout = app_node.get_optional<int>("exit-timeout"s);
+        auto virtual_display = app_node.get_optional<bool>("virtual-display"s);
 
         std::vector<proc::cmd_t> prep_cmds;
         if (!exclude_global_prep.value_or(false)) {
@@ -718,6 +738,7 @@ namespace proc {
         ctx.elevated = elevated.value_or(false);
         ctx.auto_detach = auto_detach.value_or(true);
         ctx.wait_all = wait_all.value_or(true);
+        ctx.virtual_display = virtual_display.value_or(false);
         ctx.exit_timeout = std::chrono::seconds {exit_timeout.value_or(5)};
 
         auto possible_ids = calculate_app_id(name, ctx.image_path, i++);
