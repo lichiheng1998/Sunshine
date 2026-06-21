@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh api *)",
+      "Bash(grep -rn \"enum class BackbufferFormat\\\\|BackbufferFormat::\\\\|HDR10\\\\|sRGB\\\\|UNORM\" /home/lichi/moonlight-android/pw-android/jni/../../*/wsi.hpp /home/lichi/Sunshine/third-party/Granite/vulkan/wsi.hpp 2>/dev/null | head -20; echo \"=== find wsi.hpp ===\"; find /home/lichi/Sunshine/third-party/Granite -name \"wsi.hpp\" 2>/dev/null)",
+      "Read(//home/lichi/moonlight-android/*/**)"
+    ],
+    "additionalDirectories": [
+      "/home/lichi/moonlight-android/pw-android/jni"
+    ]
+  }
+}
