@@ -17,6 +17,7 @@
 #include "buffer.hpp"
 #include "image.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <drm_fourcc.h>
@@ -262,7 +263,20 @@ struct session_t::impl_t {
     buf_info.domain = Vulkan::BufferDomain::CachedHost;
     meta_host = dev.create_buffer(buf_info);
 
-    buf_info.size = target_bytes_per_frame + 2 * encoder.get_meta_required_size();
+    // The bitstream buffer must hold the WORST-CASE frame, not the rate-control
+    // TARGET. target_bytes_per_frame is only the payload budget; the packed
+    // bitstream also carries a per-32x32-block header plus a sequence header, and
+    // the RDO routinely overshoots the target on complex frames (text, fine
+    // detail). Sizing this near the target lets the GPU packer clamp/overrun the
+    // buffer -> truncated coefficients that decode as intermittent pixelated
+    // noise (the "75 Mbps 720p is unwatchable" symptom). Size generously:
+    // max(2x target, half-uncompressed) + all block headers + meta headroom.
+    size_t blocks_32 = (static_cast<size_t>(width) + 31) / 32 *
+                       ((static_cast<size_t>(height) + 31) / 32);
+    size_t bs_header_overhead = blocks_32 * 64 + 4096;
+    buf_info.size = std::max<size_t>(target_bytes_per_frame * 2,
+                                     static_cast<size_t>(width) * height / 2) +
+                    bs_header_overhead + 2 * encoder.get_meta_required_size();
     buf_info.domain = Vulkan::BufferDomain::Device;
     bs_dev = dev.create_buffer(buf_info);
     buf_info.domain = Vulkan::BufferDomain::CachedHost;
