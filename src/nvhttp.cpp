@@ -1199,6 +1199,10 @@ namespace nvhttp {
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
+    // Pairing keeps the connection open while the user reads and enters the PIN.
+    // The default 5s request timeout closes it before they can type, causing
+    // "unexpected stream ended" on the client. 60s is enough for any human.
+    https_server.config.timeout_request = 60;
 
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.resource["^/serverinfo$"]["GET"] = serverinfo<SimpleWeb::HTTP>;
@@ -1209,6 +1213,7 @@ namespace nvhttp {
     http_server.config.reuse_address = true;
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
+    http_server.config.timeout_request = 60;
 
     auto accept_and_run = [&](auto *http_server) {
       try {

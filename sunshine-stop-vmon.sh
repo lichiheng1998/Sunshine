@@ -16,7 +16,10 @@ kscreen-doctor --json | jq -r '.outputs[] | select(.name != "Virtual-sunshine-vm
   sleep 0.5
 done
 
-# Restore Sunshine output to physical display
+# Restore Sunshine output to the physical display. KMS capture parses output_name
+# as a numeric monitor INDEX (not a connector name): writing "DP-1" makes from_view()
+# return garbage (23171) and KMS capture fails on the next non-virtual app. Use 0
+# (= DP-1, the only KMS monitor).
 CONF="${HOME}/.config/sunshine/sunshine.conf"
 sed -i '/^output_name/d' "$CONF"
-echo "output_name = DP-1" >> "$CONF"
+echo "output_name = 0" >> "$CONF"
